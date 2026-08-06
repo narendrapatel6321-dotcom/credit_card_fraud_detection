@@ -1,17 +1,9 @@
 """
-Layer 0: System Orchestrator — Pipeline Configuration.
+Pipeline configuration.
 
-Manages all static and environment-driven configuration for the fraud detection
-pipeline via a single Pydantic Settings class. Every downstream layer imports
-this class and reads its typed attributes rather than relying on scattered
-constants or unvalidated environment variables.
-
-Sections:
-    - File-system paths (data input, model artifact, SHAP plot output)
-    - XGBoost hyperparameter search bounds consumed by Optuna
-    - Training / split / early-stopping tracking parameters
-    - Asymmetric business cost weights for threshold optimisation
-    - Probability threshold grid resolution for cost-matrix sweep
+Defines all configurable paths, model hyperparameters,
+training settings, and business cost parameters used
+throughout the fraud detection pipeline.
 """
 
 import logging
@@ -24,18 +16,11 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class PipelineConfig(BaseSettings):
-    """Centralised, validated configuration for the fraud detection pipeline.
+    """
+    Central configuration shared by every pipeline component.
 
-    Attributes are loaded first from environment variables (prefix-free), then
-    from a `.env` file at the project root, and finally fall back to the
-    defaults defined below.  Pydantic validates every attribute type and range
-    at instantiation time so misconfigured environments fail fast at startup
-    rather than mid-run.
-
-    Path attributes use ``pathlib.Path`` so consumers never need to perform
-    string concatenation or manual OS-path handling.  Defaults are relative,
-    resolved against the current working directory — override via env vars,
-    a ``.env`` file, or explicit constructor kwargs (e.g. in Colab/Kaggle).
+    Values can be overridden through environment variables
+    or constructor arguments.
     """
 
     model_config = SettingsConfigDict(
@@ -44,9 +29,7 @@ class PipelineConfig(BaseSettings):
         case_sensitive=False,
     )
 
-    # ------------------------------------------------------------------
     # File-system paths (relative — override per-environment)
-    # ------------------------------------------------------------------
 
     DATA_PATH: Path = Path("data/creditcard.csv")
     """Path to the raw Kaggle European Credit Card Fraud CSV file."""
@@ -55,15 +38,12 @@ class PipelineConfig(BaseSettings):
     """Path where the trained XGBoost booster is serialised to disk."""
 
     TRANSFORMER_STATS_PATH: Path = Path("artifacts/transformer_stats.json")
-    """Path where fitted FraudFeatureTransformer statistics are persisted
-    so the inference API can reconstruct the transformer without the training data."""
+    """Path to saved transformer statistics."""
 
     SHAP_PLOT_PATH: Path = Path("artifacts/shap_summary.png")
     """Path where the SHAP feature-importance summary plot is saved."""
-
-    # ------------------------------------------------------------------
+    
     # XGBoost hyperparameter search bounds (consumed by Optuna)
-    # ------------------------------------------------------------------
 
     XGB_MAX_DEPTH_MIN: int = Field(default=3, gt=0)
     """Minimum tree depth explored during Optuna hyperparameter search."""
@@ -121,9 +101,7 @@ class PipelineConfig(BaseSettings):
     XGB_MIN_CHILD_WEIGHT_MAX: int = Field(default=20, gt=0)
     """Maximum value of ``min_child_weight`` explored during Optuna search."""
 
-    # ------------------------------------------------------------------
     # Training / tracking / split parameters
-    # ------------------------------------------------------------------
 
     OPTUNA_N_TRIALS: int = Field(default=50, gt=0)
     """Number of Optuna optimisation trials to execute during model search."""
@@ -144,9 +122,7 @@ class PipelineConfig(BaseSettings):
     RANDOM_STATE: int = 42
     """Global random seed propagated to train/test splits and XGBoost."""
 
-    # ------------------------------------------------------------------
     # Asymmetric business cost parameters
-    # ------------------------------------------------------------------
 
     COST_FALSE_NEGATIVE: float = Field(default=100.0, gt=0.0)
     """Financial penalty (USD) for each missed fraud transaction (Type II error).
@@ -156,9 +132,7 @@ class PipelineConfig(BaseSettings):
     """Financial penalty (USD) for each legitimate transaction incorrectly
     blocked (Type I error).  Reflects operational cost of manual review."""
 
-    # ------------------------------------------------------------------
     # Probability threshold grid for cost-matrix sweep
-    # ------------------------------------------------------------------
 
     THRESHOLD_GRID_START: float = Field(default=0.001, gt=0.0, lt=1.0)
     """Lower bound of the probability threshold grid searched by the
@@ -171,9 +145,7 @@ class PipelineConfig(BaseSettings):
     THRESHOLD_GRID_STEPS: int = Field(default=1000, gt=1)
     """Number of evenly-spaced threshold candidates in the grid search."""
 
-    # ------------------------------------------------------------------
     # Cross-field validation
-    # ------------------------------------------------------------------
 
     @model_validator(mode="after")
     def _validate_cross_field_constraints(self) -> "PipelineConfig":
