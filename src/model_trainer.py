@@ -1,30 +1,14 @@
 """
-Layer 4: Production XGBoost & Optimization.
+Layer 4: Model Training.
 
-Exposes ``FraudModelTrainer``, which owns the full training lifecycle:
+Provides FraudModelTrainer, responsible for:
 
-    1. ``split()`` — Stratified train / validation / test partition using the
-       fractions defined in PipelineConfig.  Stratification preserves the
-       fraud-to-legitimate ratio in every partition.
-
-    2. ``optimize()`` — Runs an Optuna TPE study over the hyperparameter bounds
-       in PipelineConfig.  Each trial trains an XGBoost booster with early
-       stopping on validation PR-AUC.  Stores best params and best n_estimators
-       as instance attributes after completion.
-
-    3. ``train_final()`` — Re-trains a production booster using the best params
-       from ``optimize()``, with early stopping on validation PR-AUC and
-       LogLoss tracking.  Returns the saved-best booster.
-
-    4. ``save_model()`` — Serialises the booster to JSON at MODEL_SAVE_PATH.
-
-    5. ``predict_proba()`` — Returns fraud probability scores for any feature
-       matrix, using the same dtype contract as training.
-
-Optimisation metric: PR-AUC (maximise) — chosen over ROC-AUC because it is
-insensitive to the extreme class imbalance in the dataset.
+- Stratified train/validation/test splitting
+- Optuna hyperparameter optimization
+- Final XGBoost training
+- Model persistence
+- Probability prediction
 """
-
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -41,36 +25,16 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class _OptunaPruningCallback(xgb.callback.TrainingCallback):
-    """XGBoost training callback that reports intermediate scores to Optuna.
-
-    After each boosting round, reports the current validation metric score to
-    the active Optuna trial.  When Optuna's pruner determines the trial is
-    unlikely to improve, raises ``optuna.TrialPruned`` which propagates out of
-    ``xgb.train()`` and is caught by ``study.optimize()``, terminating the
-    trial early.
-
-    Attributes:
-        _trial: The active Optuna trial receiving intermediate reports.
-        _metric_name: Name of the evaluation metric to monitor (e.g. "aucpr").
-        _eval_set_name: Name of the evaluation set in ``evals_log``
-            (e.g. "val").
     """
-
+    Report validation PR-AUC to Optuna and prune unpromising trials.
+    """
     def __init__(
         self,
         trial: optuna.Trial,
         metric_name: str,
         eval_set_name: str = "val",
     ) -> None:
-        """Initialise the callback for a specific trial and metric.
-
-        Args:
-            trial: Active ``optuna.Trial`` to receive intermediate reports.
-            metric_name: Evaluation metric key in the ``evals_log`` dict
-                (e.g. ``"aucpr"``).
-            eval_set_name: Key identifying the validation set in ``evals_log``
-                (defaults to ``"val"``).
-        """
+        
         super().__init__()
         self._trial: optuna.Trial = trial
         self._metric_name: str = metric_name
@@ -82,21 +46,7 @@ class _OptunaPruningCallback(xgb.callback.TrainingCallback):
         epoch: int,
         evals_log: dict[str, dict[str, list[float] | list[tuple[float, float]]]],
     ) -> bool:
-        """Report the current validation score and check for pruning.
-
-        Args:
-            model: The booster at the current iteration (unused).
-            epoch: Current boosting round index (0-based).
-            evals_log: Dict mapping eval-set name → metric name → score list.
-
-        Returns:
-            ``False`` to continue training; ``optuna.TrialPruned`` is raised
-            instead of returning ``True`` when the trial should be pruned.
-
-        Raises:
-            optuna.TrialPruned: When Optuna's pruner signals the trial should
-                be terminated early.
-        """
+        
         set_log = evals_log.get(self._eval_set_name, {})
         raw_scores = set_log.get(self._metric_name, [])
         if raw_scores:
@@ -114,17 +64,9 @@ class _OptunaPruningCallback(xgb.callback.TrainingCallback):
 
 @dataclass
 class TrainTestSplit:
-    """Typed container for the stratified train / validation / test partitions.
-
-    Attributes:
-        X_train: Feature matrix for the training partition.
-        X_val: Feature matrix for the validation partition.
-        X_test: Feature matrix for the held-out test partition.
-        y_train: Binary target vector for training (0 = legitimate, 1 = fraud).
-        y_val: Binary target vector for validation.
-        y_test: Binary target vector for the held-out test set.
     """
-
+    Container for train, validation and test splits.
+    """
     X_train: pd.DataFrame
     X_val: pd.DataFrame
     X_test: pd.DataFrame
@@ -134,21 +76,9 @@ class TrainTestSplit:
 
 
 class FraudModelTrainer:
-    """Full XGBoost training lifecycle with Optuna hyperparameter optimisation.
-
-    Manages data splitting, Optuna-driven search, final model training, model
-    persistence, and inference.  The ``optimize()`` → ``train_final()`` calling
-    convention enforces that hyperparameters are locked before the production
-    booster is created.
-
-    Attributes:
-        config: Validated ``PipelineConfig`` driving all training parameters.
-        best_params_: Tuned XGBoost hyperparameters stored after ``optimize()``.
-            ``None`` before ``optimize()`` is called.
-        best_val_aucpr_: Best validation PR-AUC from the Optuna study.
-            ``None`` before ``optimize()`` is called.
-        best_n_estimators_: Optimal boosting rounds from early stopping during
-            the best Optuna trial.  ``None`` before ``optimize()`` is called.
+    """
+    Handles data splitting, hyperparameter optimization,
+    training, model saving and inference.
     """
 
     def __init__(self, config: PipelineConfig) -> None:
@@ -164,26 +94,19 @@ class FraudModelTrainer:
         logger.info("FraudModelTrainer initialised.")
 
     def split(self, df: pd.DataFrame) -> TrainTestSplit:
-        """Produce stratified train / validation / test partitions.
-
-        Split fractions (from config):
-            - Train : 1 − TEST_SPLIT − VALIDATION_SPLIT  (≈ 70%)
-            - Val   : VALIDATION_SPLIT                   (≈ 15%)
-            - Test  : TEST_SPLIT                         (≈ 15%)
-
-        Both splits use ``stratify`` to maintain the fraud-to-legitimate ratio
-        in every partition, which is critical at a ~0.17 % prevalence rate.
-
+        """
+        Split the dataset into stratified train,
+        validation and test partitions.
         Args:
-            df: Engineered DataFrame produced by ``FraudFeatureTransformer``.
-                Must contain a ``Class`` column (int32, 0 / 1).
+            df: Engineered DataFrame produced by FraudFeatureTransformer.
+                Must contain a Class column (int32, 0 / 1).
 
         Returns:
-            ``TrainTestSplit`` dataclass with six fields: X_train, X_val,
+            TrainTestSplit dataclass with six fields: X_train, X_val,
             X_test, y_train, y_val, y_test.
 
         Raises:
-            KeyError: If the ``Class`` column is absent from ``df``.
+            KeyError: If the Class column is absent from df.
             ValueError: If stratification fails due to too few positive samples
                 in one of the partitions.
             RuntimeError: On any unexpected splitting error.
@@ -268,6 +191,12 @@ class FraudModelTrainer:
         dval: xgb.DMatrix,
         scale_pos_weight: float,
     ) -> Callable[[optuna.Trial], float]:
+        
+        """
+        Create the Optuna objective function used during
+        hyperparameter optimization.
+        """
+        
         def objective(trial: optuna.Trial) -> float:
             params: dict[str, Any] = {
                 "objective": "binary:logistic",
@@ -397,15 +326,8 @@ class FraudModelTrainer:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
             logger.info(
-                "Starting Optuna hyperparameter search.\n"
-                "  Trials          : %d\n"
-                "  Train rows      : %d\n"
-                "  Val rows        : %d\n"
-                "  scale_pos_weight: %.2f",
-                self.config.OPTUNA_N_TRIALS,
-                len(X_train),
-                len(X_val),
-                scale_pos_weight,
+            "Training final model with %d boosting rounds.",
+            self.config.XGB_N_ESTIMATORS_MAX,
             )
 
             feature_names: list[str] = X_train.columns.tolist()
@@ -483,6 +405,12 @@ class FraudModelTrainer:
         y_val: pd.Series,
         scale_pos_weight: float,
     ) -> xgb.Booster:
+        
+        """
+        Train the final XGBoost model using the best
+        hyperparameters found by Optuna.
+        """
+        
         try:
             if self.best_params_ is None:
                 raise RuntimeError(
@@ -606,6 +534,11 @@ class FraudModelTrainer:
         booster: xgb.Booster,
         X: pd.DataFrame | np.ndarray,
     ) -> np.ndarray:
+        
+        """
+        Predict fraud probabilities for the given feature matrix.
+        """
+        
         try:
             feature_names: list[str] | None = (
                 X.columns.tolist() if isinstance(X, pd.DataFrame) else None
