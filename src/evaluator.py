@@ -1,25 +1,13 @@
 """
-Layer 5: Cost-Matrix Evaluator and Explainability Engine.
+Layer 5: Evaluation and Explainability.
 
-Provides two independent classes that operate on a trained XGBoost booster and
-a held-out test partition:
+Provides two components for post-training analysis:
 
-    ``CostMatrixEvaluator``
-        Sweeps a fine probability-threshold grid and selects the decision
-        boundary that minimises total financial loss using asymmetric costs:
-            - False Negative (missed fraud)  = $100 per transaction
-            - False Positive (blocked legit) = $5  per transaction
-
-    ``ExplainabilityEngine``
-        Computes SHAP TreeExplainer values for the booster and produces a
-        summary bar plot saved to ``config.SHAP_PLOT_PATH``.  The raw SHAP
-        values matrix is also returned so callers can build custom
-        visualisations or include them in regulatory reports.
-
-Both classes accept a ``PipelineConfig`` at construction time so they share the
-same cost parameters and file-system paths as every other pipeline layer.
+- CostMatrixEvaluator: Finds the probability threshold that minimises
+  business cost using an asymmetric cost matrix.
+- ExplainabilityEngine: Generates SHAP-based feature importance and
+  explanation artefacts for the trained XGBoost model.
 """
-
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +15,7 @@ from typing import Any
 
 import matplotlib
 
-matplotlib.use("Agg")  # non-interactive backend — must precede pyplot import
+matplotlib.use("Agg")  
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -46,88 +34,44 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 @dataclass
 class ThresholdSearchResult:
-    """Immutable record produced by ``CostMatrixEvaluator.find_optimal_threshold()``.
-
-    Attributes:
-        optimal_threshold: Probability cut-off that minimises total cost.
-        minimum_total_cost: Total financial loss at ``optimal_threshold``.
-        false_negative_count: Number of missed frauds at ``optimal_threshold``.
-        false_positive_count: Number of blocked legitimate txns at that threshold.
-        true_positive_count: Correctly identified frauds at that threshold.
-        true_negative_count: Correctly passed legitimate txns at that threshold.
-        precision: TP / (TP + FP) at ``optimal_threshold``; 0.0 if denominator
-            is zero.
-        recall: TP / (TP + FN) at ``optimal_threshold``; 0.0 if denominator is
-            zero.
-        f1_score: Harmonic mean of precision and recall; 0.0 if denominator is
-            zero.
-        threshold_grid: Full array of threshold candidates that were evaluated.
-        cost_curve: Total cost at every threshold in ``threshold_grid``.
     """
+    Results returned by CostMatrixEvaluator.find_optimal_threshold().
 
+    Stores the optimal decision threshold, confusion matrix statistics,
+    classification metrics, and the full threshold-cost curve.
+    """
     optimal_threshold: float
     minimum_total_cost: float
-    false_negative_count: int
-    false_positive_count: int
+    
     true_positive_count: int
     true_negative_count: int
+    false_positive_count: int
+    false_negative_count: int
+    
     precision: float
     recall: float
     f1_score: float
+    
     threshold_grid: np.ndarray
     cost_curve: np.ndarray
 
-
 @dataclass
 class ExplainabilityResult:
-    """Immutable record produced by ``ExplainabilityEngine.explain()``.
-
-    Attributes:
-        shap_values: 2-D array of shape ``(n_samples, n_features)`` containing
-            the SHAP contribution of each feature for every test sample.
-        feature_names: Ordered list of feature column names corresponding to
-            axis-1 of ``shap_values``.
-        plot_path: Absolute path where the SHAP summary PNG was saved.
-        mean_abs_shap: Series mapping feature name → mean |SHAP| across all
-            test samples, sorted descending.
+    """ Results returned by ExplainabilityEngine.explain().
+    Contains the computed SHAP values, feature names, generated plot location, and aggregated feature importance scores.
     """
-
     shap_values: np.ndarray
     feature_names: list[str]
     plot_path: Path
     mean_abs_shap: pd.Series = field(default_factory=pd.Series)
 
-
-# ---------------------------------------------------------------------------
 # CostMatrixEvaluator
-# ---------------------------------------------------------------------------
-
 
 class CostMatrixEvaluator:
-    """Threshold optimiser driven by asymmetric business costs.
-
-    The evaluator iterates a uniform grid of probability thresholds between
-    ``config.THRESHOLD_GRID_START`` and ``config.THRESHOLD_GRID_END``.  At
-    each candidate threshold it classifies every test-set prediction, computes
-    the confusion matrix, and calculates:
-
-        total_cost = (FN_count × COST_FALSE_NEGATIVE)
-                   + (FP_count × COST_FALSE_POSITIVE)
-
-    The threshold that produces the lowest ``total_cost`` is returned as the
-    production decision boundary.
-
-    Attributes:
-        config: Validated ``PipelineConfig`` supplying cost constants and grid
-            resolution.
-    """
+    """ Optimise the classification threshold using the configured business cost matrix. """
 
     def __init__(self, config: PipelineConfig) -> None:
-        """Initialise the evaluator with pipeline configuration.
-
-        Args:
-            config: Instantiated ``PipelineConfig`` object.
-        """
+        """Initialise the evaluator."""
         self.config: PipelineConfig = config
         logger.info(
             "CostMatrixEvaluator initialised. FN cost: $%.0f | FP cost: $%.0f | "
@@ -144,31 +88,20 @@ class CostMatrixEvaluator:
         y_true: pd.Series | np.ndarray,
         y_proba: np.ndarray,
     ) -> ThresholdSearchResult:
-        """Sweep the probability grid and return the cost-minimising threshold.
-
-        At each threshold candidate the method:
-            1. Converts continuous probabilities to binary predictions.
-            2. Derives TP, TN, FP, FN from element-wise comparison with
-               ``y_true``.
-            3. Computes ``total_cost = FN × COST_FN + FP × COST_FP``.
-        The threshold with the lowest total cost is selected.
+        """Find the probability threshold that minimises total business cost.
+        Evaluates the configured threshold grid using the supplied fraud
+        probabilities and returns the threshold with the lowest overall cost.
 
         Args:
-            y_true: Ground-truth binary labels (0 = legitimate, 1 = fraud).
-                Accepts both ``pd.Series`` and ``np.ndarray``; internally
-                converted to a 1-D int32 NumPy array.
-            y_proba: Model output probabilities in [0, 1], shape (n_samples,).
-
+            y_true: Ground-truth binary labels.
+            y_proba: Predicted fraud probabilities.
         Returns:
-            ``ThresholdSearchResult`` populated with the optimal threshold,
-            its confusion-matrix statistics, derived classification metrics,
-            and the full cost curve for downstream plotting.
-
+            ThresholdSearchResult containing the optimal threshold,
+            evaluation metrics, and the complete threshold-cost curve.
         Raises:
-            ValueError: If ``y_true`` and ``y_proba`` have different lengths or
-                if ``y_proba`` contains values outside [0, 1].
-            RuntimeError: If the grid search fails for any unexpected reason.
-        """
+            ValueError: If the inputs are invalid.
+            RuntimeError: If threshold optimisation fails unexpectedly."""
+        
         try:
             labels: np.ndarray = np.asarray(y_true, dtype=np.int32).ravel()
             proba: np.ndarray = np.asarray(y_proba, dtype=np.float32).ravel()
@@ -236,16 +169,9 @@ class CostMatrixEvaluator:
                 "  Minimum cost      : $%.2f\n"
                 "  TP=%d  TN=%d  FP=%d  FN=%d\n"
                 "  Precision=%.4f  Recall=%.4f  F1=%.4f",
-                optimal_threshold,
-                minimum_cost,
-                tp,
-                tn,
-                fp,
-                fn,
-                precision,
-                recall,
-                f1,
-            )
+                optimal_threshold, minimum_cost, 
+                tp, tn, fp, fn,
+                precision, recall, f1, )
 
             return ThresholdSearchResult(
                 optimal_threshold=optimal_threshold,
@@ -275,23 +201,18 @@ class CostMatrixEvaluator:
         y_proba: np.ndarray,
         threshold: float,
     ) -> dict[str, Any]:
-        """Compute confusion matrix and cost at a user-supplied threshold.
-
-        Useful for auditing a threshold that was determined externally (e.g.
-        from a previous run) without re-running the full grid search.
+        """Evaluate model performance at a specified probability threshold.
 
         Args:
-            y_true: Ground-truth binary labels, shape (n_samples,).
-            y_proba: Model output probabilities in [0, 1], shape (n_samples,).
-            threshold: Decision boundary to apply; must be in (0, 1).
-
+            y_true: Ground-truth binary labels.
+            y_proba: Predicted fraud probabilities.
+            threshold: Decision threshold to evaluate.
         Returns:
-            Dictionary with keys: ``threshold``, ``tp``, ``tn``, ``fp``,
-            ``fn``, ``total_cost``, ``precision``, ``recall``, ``f1_score``.
-
+            Dictionary containing the confusion matrix, business cost,
+            and classification metrics at the specified threshold.
         Raises:
-            ValueError: If ``threshold`` is not in (0, 1) or array lengths
-                differ.
+            ValueError: If the threshold or inputs are invalid.
+            RuntimeError: If evaluation fails unexpectedly.
         """
         try:
             if not (0.0 < threshold < 1.0):
@@ -323,7 +244,7 @@ class CostMatrixEvaluator:
                 else 0.0
             )
 
-            result: dict[str, Any] = {
+            metrics: dict[str, Any] = {
                 "threshold": threshold,
                 "tp": tp,
                 "tn": tn,
@@ -339,12 +260,9 @@ class CostMatrixEvaluator:
                 "Evaluation at threshold=%.4f: cost=$%.2f " "TP=%d TN=%d FP=%d FN=%d",
                 threshold,
                 total_cost,
-                tp,
-                tn,
-                fp,
-                fn,
+                tp, tn, fp, fn,
             )
-            return result
+            return metrics
 
         except ValueError:
             raise
@@ -354,34 +272,13 @@ class CostMatrixEvaluator:
                 f"CostMatrixEvaluator.evaluate_at_threshold failed: {exc}"
             ) from exc
 
-
-# ---------------------------------------------------------------------------
 # ExplainabilityEngine
-# ---------------------------------------------------------------------------
-
 
 class ExplainabilityEngine:
-    """SHAP-based feature importance calculator for regulatory explainability.
-
-    Uses ``shap.TreeExplainer`` which operates directly on the internal tree
-    structure of the XGBoost booster — no sampling or approximation is required
-    for tree models.  The resulting SHAP values represent the exact Shapley
-    contribution of each feature to every individual prediction.
-
-    The summary bar plot shows mean absolute SHAP values aggregated across all
-    provided test samples and is saved as a PNG to ``config.SHAP_PLOT_PATH``.
-
-    Attributes:
-        config: Validated ``PipelineConfig`` supplying the SHAP plot output
-            path.
-    """
-
+    """ Generate SHAP-based explanations for a trained XGBoost model. """
+    
     def __init__(self, config: PipelineConfig) -> None:
-        """Initialise the engine with pipeline configuration.
-
-        Args:
-            config: Instantiated ``PipelineConfig`` object.
-        """
+        """ Initialise the explainability engine. """
         self.config: PipelineConfig = config
         logger.info(
             "ExplainabilityEngine initialised. SHAP plot path: %s",
@@ -393,31 +290,20 @@ class ExplainabilityEngine:
         booster: xgb.Booster,
         X_test: pd.DataFrame,
     ) -> ExplainabilityResult:
-        """Compute SHAP values and persist the feature-importance summary plot.
-
-        Workflow:
-            1. Instantiate ``shap.TreeExplainer(booster)`` — leverages the
-               exact tree structure; no background dataset required.
-            2. Call ``explainer.shap_values(X_test)`` — returns a 2-D array
-               (n_samples, n_features) of per-sample Shapley contributions.
-            3. Compute ``mean_abs_shap = |shap_values|.mean(axis=0)`` and rank
-               features descending by importance.
-            4. Render a horizontal bar chart via ``matplotlib`` and save to
-               ``config.SHAP_PLOT_PATH``, creating parent directories if absent.
+        """
+        Compute SHAP values and generate the feature-importance summary plot.
 
         Args:
-            booster: Trained ``xgb.Booster`` whose trees are explained.
-            X_test: Feature matrix used for explanation; must share the same
-                column order as the training data seen by the booster.
+            booster: Trained XGBoost booster.
+            X_test: Feature matrix used for explanation.
 
         Returns:
-            ``ExplainabilityResult`` containing the raw SHAP matrix, ordered
-            feature names, absolute plot path, and the mean |SHAP| series.
+            ExplainabilityResult containing the SHAP values, feature names,
+            summary plot path, and mean absolute SHAP values.
 
         Raises:
-            ValueError: If ``X_test`` is empty.
-            RuntimeError: Wraps any ``shap`` or ``matplotlib`` error.
-        """
+            ValueError: If X_test is empty.
+            RuntimeError: If SHAP computation fails unexpectedly. """
         try:
             if X_test.empty:
                 raise ValueError(
@@ -478,20 +364,15 @@ class ExplainabilityEngine:
         feature_names: list[str],
         mean_abs_shap: np.ndarray,
     ) -> None:
-        """Render a horizontal bar chart of mean absolute SHAP values and save.
-
-        Displays up to 20 features (most important first) on the y-axis with
-        mean |SHAP| on the x-axis.  The figure is saved as a PNG at
-        ``config.SHAP_PLOT_PATH``; parent directories are created automatically.
+        """
+        Save a horizontal bar chart of mean absolute SHAP values.
 
         Args:
-            feature_names: Feature names sorted by descending mean |SHAP|.
-            mean_abs_shap: Corresponding mean absolute SHAP values (same
-                order as ``feature_names``).
+            feature_names: Feature names sorted by importance.
+            mean_abs_shap: Mean absolute SHAP values for each feature.
 
         Raises:
-            RuntimeError: If the plot cannot be saved (e.g. permission error).
-        """
+            RuntimeError: If the plot cannot be saved. """
         try:
             max_features: int = 20
             display_names: list[str] = feature_names[:max_features]
