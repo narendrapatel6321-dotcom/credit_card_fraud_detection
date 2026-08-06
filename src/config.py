@@ -94,9 +94,7 @@ class PipelineConfig(BaseSettings):
     """Maximum boosting rounds explored during Optuna search."""
 
     XGB_MIN_CHILD_WEIGHT_MIN: int = Field(default=1, gt=0)
-    """Minimum value of ``min_child_weight`` explored during Optuna search.
-    Controls minimum sum of instance weights required in a child node — critical
-    for imbalanced datasets where small leaves overfit to rare fraud patterns."""
+    """Minimum min_child_weight explored during Optuna search."""
 
     XGB_MIN_CHILD_WEIGHT_MAX: int = Field(default=20, gt=0)
     """Maximum value of ``min_child_weight`` explored during Optuna search."""
