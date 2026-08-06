@@ -1,5 +1,4 @@
-"""
-Layer 4: Model Training.
+""" Layer 4: Model Training.
 
 Provides FraudModelTrainer, responsible for:
 
@@ -7,8 +6,8 @@ Provides FraudModelTrainer, responsible for:
 - Optuna hyperparameter optimization
 - Final XGBoost training
 - Model persistence
-- Probability prediction
-"""
+- Probability prediction """
+
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -25,15 +24,14 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class _OptunaPruningCallback(xgb.callback.TrainingCallback):
-    """
-    Report validation PR-AUC to Optuna and prune unpromising trials.
-    """
+     """Reports validation PR-AUC to Optuna for trial pruning."""
     def __init__(
         self,
         trial: optuna.Trial,
         metric_name: str,
         eval_set_name: str = "val",
     ) -> None:
+        """Initialise the callback for a single Optuna trial."""
         
         super().__init__()
         self._trial: optuna.Trial = trial
@@ -46,6 +44,7 @@ class _OptunaPruningCallback(xgb.callback.TrainingCallback):
         epoch: int,
         evals_log: dict[str, dict[str, list[float] | list[tuple[float, float]]]],
     ) -> bool:
+        """Report the latest validation score and prune if requested."""
         
         set_log = evals_log.get(self._eval_set_name, {})
         raw_scores = set_log.get(self._metric_name, [])
@@ -64,9 +63,7 @@ class _OptunaPruningCallback(xgb.callback.TrainingCallback):
 
 @dataclass
 class TrainTestSplit:
-    """
-    Container for train, validation and test splits.
-    """
+    """ Container for train, validation and test splits. """
     X_train: pd.DataFrame
     X_val: pd.DataFrame
     X_test: pd.DataFrame
@@ -76,10 +73,7 @@ class TrainTestSplit:
 
 
 class FraudModelTrainer:
-    """
-    Handles data splitting, hyperparameter optimization,
-    training, model saving and inference.
-    """
+    """ Handles data splitting, hyperparameter optimization, training, model saving and inference. """
 
     def __init__(self, config: PipelineConfig) -> None:
         """Initialise the trainer in an unoptimised state.
@@ -93,6 +87,30 @@ class FraudModelTrainer:
         self.best_n_estimators_: int | None = None
         logger.info("FraudModelTrainer initialised.")
 
+    def _create_dmatrices(
+    self,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+) -> tuple[xgb.DMatrix, xgb.DMatrix]:
+    """Create training and validation DMatrices."""
+
+    feature_names = X_train.columns.tolist()
+
+    dtrain: xgb.DMatrix = xgb.DMatrix(
+                X_train.values.astype(np.float32),
+                label=y_train.values.astype(np.int32),
+                feature_names=feature_names,
+            )
+    dval: xgb.DMatrix = xgb.DMatrix(
+                X_val.values.astype(np.float32),
+                label=y_val.values.astype(np.int32),
+                feature_names=feature_names,
+            )
+
+    return dtrain, dval
+    
     def split(self, df: pd.DataFrame) -> TrainTestSplit:
         """
         Split the dataset into stratified train,
@@ -191,11 +209,7 @@ class FraudModelTrainer:
         dval: xgb.DMatrix,
         scale_pos_weight: float,
     ) -> Callable[[optuna.Trial], float]:
-        
-        """
-        Create the Optuna objective function used during
-        hyperparameter optimization.
-        """
+        """ Create the Optuna objective function used during hyperparameter optimization. """
         
         def objective(trial: optuna.Trial) -> float:
             params: dict[str, Any] = {
@@ -326,21 +340,10 @@ class FraudModelTrainer:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
             logger.info(
-            "Training final model with %d boosting rounds.",
-            self.config.XGB_N_ESTIMATORS_MAX,
-            )
-
-            feature_names: list[str] = X_train.columns.tolist()
-            dtrain: xgb.DMatrix = xgb.DMatrix(
-                X_train.values.astype(np.float32),
-                label=y_train.values.astype(np.int32),
-                feature_names=feature_names,
-            )
-            dval: xgb.DMatrix = xgb.DMatrix(
-                X_val.values.astype(np.float32),
-                label=y_val.values.astype(np.int32),
-                feature_names=feature_names,
-            )
+            "Starting Optuna hyperparameter optimization (%d trials).",
+            self.config.OPTUNA_N_TRIALS )
+            
+            dtrain, dval = self._create_dmatrices(X_train,y_train,X_val,y_val)
 
             objective: Callable[[optuna.Trial], float] = self._build_objective(
                 dtrain, dval, scale_pos_weight
@@ -405,19 +408,14 @@ class FraudModelTrainer:
         y_val: pd.Series,
         scale_pos_weight: float,
     ) -> xgb.Booster:
-        
-        """
-        Train the final XGBoost model using the best
-        hyperparameters found by Optuna.
-        """
-        
+        """ Train the final XGBoost model using the best hyperparameters found by Optuna. """
         try:
             if self.best_params_ is None:
                 raise RuntimeError(
                     "train_final() called before optimize(). "
                     "Call optimize() first to obtain best hyperparameters."
                 )
-
+                
             params: dict[str, Any] = {
                 **self.best_params_,
                 "objective": "binary:logistic",
@@ -429,17 +427,7 @@ class FraudModelTrainer:
                 "nthread": -1,
             }
 
-            feature_names: list[str] = X_train.columns.tolist()
-            dtrain: xgb.DMatrix = xgb.DMatrix(
-                X_train.values.astype(np.float32),
-                label=y_train.values.astype(np.int32),
-                feature_names=feature_names,
-            )
-            dval: xgb.DMatrix = xgb.DMatrix(
-                X_val.values.astype(np.float32),
-                label=y_val.values.astype(np.int32),
-                feature_names=feature_names,
-            )
+            dtrain, dval = self._create_dmatrices(X_train,y_train,X_val,y_val)
 
             evals_result: dict[str, dict[str, list[float]]] = {}
             callbacks: list[Any] = [
@@ -502,18 +490,7 @@ class FraudModelTrainer:
 
 
     def save_model(self, booster: xgb.Booster) -> None:
-        """Serialise the production booster to ``config.MODEL_SAVE_PATH``.
-
-        Creates the parent directory tree if it does not exist.  Saves in
-        XGBoost's native JSON format, which is human-readable and supports
-        lossless round-trip loading.
-
-        Args:
-            booster: Trained ``xgb.Booster`` returned by ``train_final()``.
-
-        Raises:
-            RuntimeError: On any file-system error during model persistence.
-        """
+        """Save the trained XGBoost model."""
         try:
             self.config.MODEL_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
             booster.save_model(str(self.config.MODEL_SAVE_PATH))
@@ -533,12 +510,8 @@ class FraudModelTrainer:
         self,
         booster: xgb.Booster,
         X: pd.DataFrame | np.ndarray,
-    ) -> np.ndarray:
-        
-        """
-        Predict fraud probabilities for the given feature matrix.
-        """
-        
+    ) -> np.ndarray: 
+        """ Predict fraud probabilities for the given feature matrix."""
         try:
             feature_names: list[str] | None = (
                 X.columns.tolist() if isinstance(X, pd.DataFrame) else None
