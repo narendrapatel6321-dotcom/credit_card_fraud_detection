@@ -283,6 +283,7 @@ class FraudModelTrainer:
                 evals=[(dtrain, "train"), (dval, "val")],
                 callbacks=callbacks,
                 evals_result=evals_result,
+                verbose_eval=False,
             )
 
             val_aucpr_list: list[float] = evals_result["val"]["aucpr"]
@@ -456,6 +457,7 @@ class FraudModelTrainer:
                 evals=[(dtrain, "train"), (dval, "val")],
                 callbacks=callbacks,
                 evals_result=evals_result,
+                verbose_eval=False,
             )
 
             val_aucpr_list: list[float] = evals_result["val"]["aucpr"]
