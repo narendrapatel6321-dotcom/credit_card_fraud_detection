@@ -18,7 +18,7 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 
-from config import PipelineConfig
+from src.config import PipelineConfig
 
 logger: logging.Logger = logging.getLogger(__name__)
 
