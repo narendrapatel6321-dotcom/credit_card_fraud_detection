@@ -22,7 +22,7 @@ from typing import Self
 import numpy as np
 import pandas as pd
 
-from config import PipelineConfig
+from src.config import PipelineConfig
 
 logger: logging.Logger = logging.getLogger(__name__)
 
