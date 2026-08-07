@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
  
-from config import PipelineConfig
+from src.config import PipelineConfig
  
 logger: logging.Logger = logging.getLogger(__name__)
  
@@ -204,7 +204,7 @@ class ImbalanceAnalyzer:
     """ Analyse class imbalance and compute training statistics. """
  
     def __init__(self, config: PipelineConfig) -> None:
-       """ Initialise the imbalance analyzer. """
+        """ Initialise the imbalance analyzer. """
         self.config: PipelineConfig = config
         logger.info("ImbalanceAnalyzer initialised.")
  
