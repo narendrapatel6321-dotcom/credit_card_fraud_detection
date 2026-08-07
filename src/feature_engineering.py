@@ -173,7 +173,7 @@ class FraudFeatureTransformer:
         return self.fit(df).transform(df)
 
     def save_state(self, path: Path) -> None:
-       """Persist fitted transformer statistics to JSON."""
+        """Persist fitted transformer statistics to JSON."""
         try:
             if not self.is_fitted_:
                 raise RuntimeError(
@@ -199,7 +199,7 @@ class FraudFeatureTransformer:
             ) from exc
 
     def load_state(self, path: Path) -> Self:
-       """Load fitted transformer statistics from JSON."""
+        """Load fitted transformer statistics from JSON."""
         try:
             if not path.exists():
                 raise FileNotFoundError(
