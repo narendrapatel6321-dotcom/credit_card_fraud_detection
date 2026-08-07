@@ -24,7 +24,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class _OptunaPruningCallback(xgb.callback.TrainingCallback):
-     """Reports validation PR-AUC to Optuna for trial pruning."""
+    """Reports validation PR-AUC to Optuna for trial pruning."""
     def __init__(
         self,
         trial: optuna.Trial,
@@ -94,22 +94,22 @@ class FraudModelTrainer:
     X_val: pd.DataFrame,
     y_val: pd.Series,
 ) -> tuple[xgb.DMatrix, xgb.DMatrix]:
-    """Create training and validation DMatrices."""
+         """Create training and validation DMatrices."""
 
-    feature_names = X_train.columns.tolist()
+         feature_names = X_train.columns.tolist()
 
-    dtrain: xgb.DMatrix = xgb.DMatrix(
+         dtrain: xgb.DMatrix = xgb.DMatrix(
                 X_train.values.astype(np.float32),
                 label=y_train.values.astype(np.int32),
                 feature_names=feature_names,
             )
-    dval: xgb.DMatrix = xgb.DMatrix(
+         dval: xgb.DMatrix = xgb.DMatrix(
                 X_val.values.astype(np.float32),
                 label=y_val.values.astype(np.int32),
                 feature_names=feature_names,
             )
 
-    return dtrain, dval
+         return dtrain, dval
     
     def split(self, df: pd.DataFrame) -> TrainTestSplit:
         """
